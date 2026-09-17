@@ -22,8 +22,8 @@ CONDITIONS = {
     'ippo_SR': {'env.shared_rewards': True},
 }
 
-SEEDS = (1, 2)
-TOTAL_TIMESTEPS = 100_000_000
+SEEDS = (1, 2, 3, 4, 5)
+TOTAL_TIMESTEPS = 500_000_000
 LOG_EVERY_STEPS = 2_000_000
 FINAL_EVAL_EPISODES = 10_000
 OUT_DIR = 'out/curves'
