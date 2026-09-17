@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+out/
+CLAUDE.md
+plan/
+
+paper/
+data_archives/
