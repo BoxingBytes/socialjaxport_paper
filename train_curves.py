@@ -1,40 +1,57 @@
-"""Run (condition x seed) PufferLib trainings back to back, one JSONL curve per run.
+"""Run (condition x seed) PufferLib 5.0 trainings back to back, one JSONL curve per run.
 
 Standalone: scp next to PufferLib on the GPU box and run from the PufferLib root.
-Assumes ./build.sh <ENV_NAME> has already produced a CUDA build.
+Assumes ./build.sh <ENV_NAME> has already produced ./puffer.
 """
 import argparse
 import hashlib
 import itertools
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import time
-import traceback
 from datetime import datetime, timezone
 
 ENV_NAME = 'common_harvest'
+PUFFER_BIN = './puffer'
 
 CONDITIONS = {
-    'ippo_IR': {'env.shared_rewards': False},
-    'ippo_SR': {'env.shared_rewards': True},
+    'ippo_IR': {'env.shared_rewards': False, 'env.inequity_aversion': False},
+    'ippo_SR': {'env.shared_rewards': True, 'env.inequity_aversion': False},
+    'ippo_IA': {'env.shared_rewards': False, 'env.inequity_aversion': True},
 }
 
 SEEDS = (1, 2, 3, 4, 5)
-TOTAL_TIMESTEPS = 500_000_000
-LOG_EVERY_STEPS = 2_000_000
+TOTAL_TIMESTEPS = None
+POINTS = 64
 FINAL_EVAL_EPISODES = 10_000
+ENV_RNG_STRIDE = 65_536  # > num_envs: disjoint env streams across seeds
 OUT_DIR = 'out/curves'
 CHECKPOINT_DIR = 'out/checkpoints'
-SAVE_CHECKPOINTS = True
+PUFFER_LOG_DIR = 'out/puffer_logs'
 
-EVAL_STALL_POLLS = 20
+
+def run_id(condition, seed):
+    return f'{ENV_NAME}_{condition}_s{seed}'
 
 
 def run_path(condition, seed):
-    return os.path.join(OUT_DIR, f'{ENV_NAME}_{condition}_s{seed}.jsonl')
+    return os.path.join(OUT_DIR, f'{run_id(condition, seed)}.jsonl')
+
+
+def puffer_log_path(condition, seed):
+    return os.path.join(PUFFER_LOG_DIR, ENV_NAME, f'{run_id(condition, seed)}.ini')
+
+
+def puffer_checkpoint_dir(condition, seed):
+    return os.path.join(CHECKPOINT_DIR, ENV_NAME, run_id(condition, seed))
+
+
+def final_checkpoint_dir(condition, seed):
+    return os.path.join(CHECKPOINT_DIR, run_id(condition, seed))
 
 
 def is_complete(path):
@@ -50,28 +67,71 @@ def script_sha256():
 
 
 def pufferlib_commit():
-    import pufferlib
-    repo = os.path.dirname(os.path.dirname(os.path.realpath(pufferlib.__file__)))
     try:
-        out = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'],
+        out = subprocess.run(['git', 'rev-parse', 'HEAD'],
             capture_output=True, text=True, timeout=10)
         return out.stdout.strip() or None
     except Exception:
         return None
 
 
-def apply_override(args, dotted, value):
-    keys = dotted.split('.')
-    node = args
-    for key in keys[:-1]:
-        assert key in node, f'unknown config section {key!r} in override {dotted!r}'
-        node = node[key]
-    assert keys[-1] in node, f'unknown config key {dotted!r}'
-    node[keys[-1]] = value
-
-
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def puffer_command(condition, seed):
+    overrides = {
+        **CONDITIONS[condition],
+        'base.run_id': run_id(condition, seed),
+        'base.seed': seed,
+        'env.rng': seed * ENV_RNG_STRIDE,
+        'base.checkpoint_dir': CHECKPOINT_DIR,
+        'base.checkpoint_interval': 0,
+        'base.log_dir': PUFFER_LOG_DIR,
+        'base.eval_episodes': FINAL_EVAL_EPISODES,
+        'sweep.downsample': POINTS,
+    }
+    if TOTAL_TIMESTEPS is not None:
+        overrides['train.total_timesteps'] = TOTAL_TIMESTEPS
+    return [PUFFER_BIN, 'train'] + [f'--{key}={value}' for key, value in overrides.items()]
+
+
+def parse_scalar(raw):
+    for cast in (int, float):
+        try:
+            return cast(raw)
+        except ValueError:
+            pass
+    return raw
+
+
+def read_puffer_log(path):
+    sections = {}
+    node = None
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('['):
+                node = sections.setdefault(line[1:-1], {})
+                continue
+            key, _, value = line.partition('=')
+            node[key.strip()] = value.strip()
+    metrics = {key: [float(v) for v in raw.split(',')]
+        for key, raw in sections.pop('metrics').items()}
+    args = {name: {key: parse_scalar(v) for key, v in section.items()}
+        for name, section in sections.items()}
+    return args, metrics
+
+
+def move_final_checkpoint(condition, seed):
+    src_dir = puffer_checkpoint_dir(condition, seed)
+    final = max(os.listdir(src_dir))
+    dst_dir = final_checkpoint_dir(condition, seed)
+    os.makedirs(dst_dir, exist_ok=True)
+    os.replace(os.path.join(src_dir, final), os.path.join(dst_dir, final))
+    os.removedirs(src_dir)
 
 
 class Writer:
@@ -88,29 +148,15 @@ class Writer:
         self._f.close()
 
 
-def worker(condition, seed):
-    sys.argv = sys.argv[:1]
-    from pufferlib import pufferl
+def run(condition, seed):
+    for stale in (puffer_checkpoint_dir(condition, seed), final_checkpoint_dir(condition, seed)):
+        shutil.rmtree(stale, ignore_errors=True)
+    log_path = puffer_log_path(condition, seed)
+    if os.path.exists(log_path):
+        os.remove(log_path)
 
-    args = pufferl.load_config(ENV_NAME)
-    for dotted, value in CONDITIONS[condition].items():
-        apply_override(args, dotted, value)
-
-    args['seed'] = seed
-    args['env']['rng'] = seed
-    args['rank'] = 0
-    args['world_size'] = 1
-    args['gpu_id'] = 0
-    args['nccl_id'] = b''
-    args['wandb'] = False
-    if TOTAL_TIMESTEPS is not None:
-        args['train']['total_timesteps'] = TOTAL_TIMESTEPS
-
-    pufferl.validate_config(args)
-    total_timesteps = args['train']['total_timesteps']
-
-    writer = Writer(run_path(condition, seed))
-    writer.write('header', {
+    command = puffer_command(condition, seed)
+    header = {
         'env_name': ENV_NAME,
         'condition': condition,
         'seed': seed,
@@ -118,68 +164,42 @@ def worker(condition, seed):
         'started_at': now_iso(),
         'pufferlib_commit': pufferlib_commit(),
         'script_sha256': script_sha256(),
-        'total_timesteps': total_timesteps,
-        'log_every_steps': LOG_EVERY_STEPS,
-        'args': args,
-    })
+        'command': command,
+        'points': POINTS,
+    }
 
     start = time.time()
-    backend = pufferl._resolve_backend(args)
-    p = None
-    try:
-        p = backend.create_pufferl(args)
-        next_log_step = 0
-        while p.global_step < total_timesteps:
-            backend.rollouts(p)
-            backend.train(p)
-            if p.global_step < next_log_step:
-                continue
+    returncode = subprocess.run(command).returncode
+    wall_time = time.time() - start
 
-            row = dict(pufferl.unroll_nested_dict(backend.log(p)))
-            if 'env/episode_return' not in row:
-                continue
-
-            writer.write('row', row)
-            next_log_step = p.global_step + LOG_EVERY_STEPS
-            print(f'{condition} s{seed} {row["agent_steps"]:>14,} '
-                f'return {row["env/episode_return"]:>10.3f} '
-                f'sps {row.get("SPS", 0):>10,.0f}', flush=True)
-
-        if SAVE_CHECKPOINTS:
-            ckpt_dir = os.path.join(CHECKPOINT_DIR, f'{ENV_NAME}_{condition}_s{seed}')
-            os.makedirs(ckpt_dir, exist_ok=True)
-            backend.save_weights(p, os.path.join(ckpt_dir, f'{p.global_step:016d}.bin'))
-
-        final_eval(backend, p, pufferl, writer)
-        backend.close(p)
-        writer.write('done', {
-            'wall_time_s': time.time() - start,
-            'final_step': p.global_step,
-            'finished_at': now_iso(),
-        })
-    except Exception as e:
-        writer.write('failed', {'error': repr(e), 'traceback': traceback.format_exc()})
+    writer = Writer(run_path(condition, seed))
+    if returncode != 0 or not os.path.exists(log_path):
+        writer.write('header', header)
+        writer.write('failed', {'error': f'{PUFFER_BIN} exited with code {returncode}',
+            'puffer_log_exists': os.path.exists(log_path)})
         writer.close()
-        raise
+        return False
 
+    args, metrics = read_puffer_log(log_path)
+    assert args['base']['env_name'] == ENV_NAME, \
+        f'{PUFFER_BIN} is built for {args["base"]["env_name"]!r}, rebuild with ./build.sh {ENV_NAME}'
+    writer.write('header', {**header, 'total_timesteps': args['train']['total_timesteps'],
+        'args': args})
+
+    # Last column is the final snapshot with the eval overlaid
+    columns = [dict(zip(metrics, values)) for values in zip(*metrics.values())]
+    for row in columns[:-1]:
+        writer.write('row', row)
+    writer.write('final_eval', columns[-1])
+
+    move_final_checkpoint(condition, seed)
+    writer.write('done', {
+        'wall_time_s': wall_time,
+        'final_step': columns[-1]['agent_steps'],
+        'finished_at': now_iso(),
+    })
     writer.close()
-
-
-def final_eval(backend, p, pufferl, writer):
-    episodes = 0
-    stalled = 0
-    row = {}
-    while episodes <= FINAL_EVAL_EPISODES:
-        backend.rollouts(p)
-        row = {**row, **dict(pufferl.unroll_nested_dict(backend.eval_log(p)))}
-        n = row.get('env/n', 0)
-        stalled = stalled + 1 if n <= episodes else 0
-        episodes = max(episodes, n)
-        if stalled >= EVAL_STALL_POLLS:
-            print(f'WARNING: eval episode count stuck at {episodes}, aborting eval', flush=True)
-            break
-
-    writer.write('final_eval', row)
+    return True
 
 
 def driver(argv):
@@ -191,23 +211,14 @@ def driver(argv):
     parser.add_argument('--seeds', type=str, default=None,
         help='Comma-separated subset of seeds')
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--worker', nargs=2, metavar=('CONDITION', 'SEED'),
-        help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-
-    if args.worker:
-        worker(args.worker[0], int(args.worker[1]))
-        return 0
 
     conditions = args.only.split(',') if args.only else list(CONDITIONS)
     for c in conditions:
         assert c in CONDITIONS, f'unknown condition {c!r}'
-        assert 'env_name' not in CONDITIONS[c], 'one build serves one env; drop the env_name override'
+        assert not any(k.startswith('base.env_name') for k in CONDITIONS[c]), \
+            'one build serves one env; drop the env_name override'
     seeds = [int(s) for s in args.seeds.split(',')] if args.seeds else list(SEEDS)
-
-    from pufferlib import pufferl
-    backend = pufferl._resolve_backend({'env_name': ENV_NAME, 'slowly': False})
-    cuda_build = hasattr(backend, 'create_pufferl')
 
     plan = list(itertools.product(conditions, seeds))
     skipped = {(c, s) for c, s in plan if args.resume and is_complete(run_path(c, s))}
@@ -216,12 +227,13 @@ def driver(argv):
         for condition, seed in plan:
             mark = 'skip' if (condition, seed) in skipped else 'write'
             print(f'{mark:>5}  {run_path(condition, seed)}')
-        print(f'backend: {"ok" if cuda_build else f"CPU-only, rebuild with ./build.sh {ENV_NAME}"}')
+            print(f'       {" ".join(puffer_command(condition, seed))}')
+        found = os.path.exists(PUFFER_BIN)
+        print(f'binary: {"ok" if found else f"missing, build with ./build.sh {ENV_NAME}"}')
         return 0
 
-    assert cuda_build, f'backend has no create_pufferl: rebuild with ./build.sh {ENV_NAME}'
+    assert os.path.exists(PUFFER_BIN), f'no {PUFFER_BIN}: build with ./build.sh {ENV_NAME}'
 
-    os.makedirs(OUT_DIR, exist_ok=True)
     results = []
     durations = []
     for i, (condition, seed) in enumerate(plan):
@@ -234,11 +246,10 @@ def driver(argv):
         print(f'\n=== [{i + 1}/{len(plan)}] {condition} seed {seed} (ETA {eta}) ===', flush=True)
 
         start = time.time()
-        proc = subprocess.run([sys.executable, os.path.realpath(__file__),
-            '--worker', condition, str(seed)])
+        ok = run(condition, seed)
         elapsed = time.time() - start
         durations.append(elapsed)
-        results.append((condition, seed, 'ok' if proc.returncode == 0 else 'failed', elapsed))
+        results.append((condition, seed, 'ok' if ok else 'failed', elapsed))
 
     print('\n=== summary ===')
     for condition, seed, status, elapsed in results:

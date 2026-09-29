@@ -28,7 +28,8 @@ def parse_args():
     parser.add_argument('--collective', action='store_true',
                         help='scale the per-agent metric by env.num_agents')
     parser.add_argument('--curves-dir', default=curves.CURVES_DIR)
-    parser.add_argument('--out', default='training_curves.png')
+    parser.add_argument('--out', default='training_curves.png',
+                        help='output file name, written inside out/ (default: %(default)s)')
     return parser.parse_args()
 
 
