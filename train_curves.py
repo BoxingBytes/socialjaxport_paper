@@ -1,7 +1,7 @@
 """Run (condition x seed) PufferLib 5.0 trainings back to back, one JSONL curve per run.
 
-Standalone: scp next to PufferLib on the GPU box and run from the PufferLib root.
-Assumes ./build.sh <ENV_NAME> has already produced ./puffer.
+Run from anywhere; ./puffer runs inside PUFFERLIB_DIR, outputs land in this repo's out/.
+Assumes ./build.sh <ENV_NAME> has already produced ./puffer in PUFFERLIB_DIR.
 """
 import argparse
 import hashlib
@@ -16,6 +16,8 @@ import time
 from datetime import datetime, timezone
 
 ENV_NAME = 'common_harvest'
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+PUFFERLIB_DIR = os.path.join(REPO_ROOT, '..', 'pufferlib')
 PUFFER_BIN = './puffer'
 
 CONDITIONS = {
@@ -29,9 +31,9 @@ TOTAL_TIMESTEPS = None
 POINTS = 64
 FINAL_EVAL_EPISODES = 10_000
 ENV_RNG_STRIDE = 65_536  # > num_envs: disjoint env streams across seeds
-OUT_DIR = 'out/curves'
-CHECKPOINT_DIR = 'out/checkpoints'
-PUFFER_LOG_DIR = 'out/puffer_logs'
+OUT_DIR = os.path.join(REPO_ROOT, 'out', 'curves')
+CHECKPOINT_DIR = os.path.join(REPO_ROOT, 'out', 'checkpoints')
+PUFFER_LOG_DIR = os.path.join(REPO_ROOT, 'out', 'puffer_logs')
 
 
 def run_id(condition, seed):
@@ -68,7 +70,7 @@ def script_sha256():
 
 def pufferlib_commit():
     try:
-        out = subprocess.run(['git', 'rev-parse', 'HEAD'],
+        out = subprocess.run(['git', '-C', PUFFERLIB_DIR, 'rev-parse', 'HEAD'],
             capture_output=True, text=True, timeout=10)
         return out.stdout.strip() or None
     except Exception:
@@ -169,7 +171,7 @@ def run(condition, seed):
     }
 
     start = time.time()
-    returncode = subprocess.run(command).returncode
+    returncode = subprocess.run(command, cwd=PUFFERLIB_DIR).returncode
     wall_time = time.time() - start
 
     writer = Writer(run_path(condition, seed))
@@ -203,6 +205,7 @@ def run(condition, seed):
 
 
 def driver(argv):
+    global PUFFERLIB_DIR
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--resume', action='store_true',
         help='Skip runs whose JSONL already has a done record')
@@ -210,8 +213,13 @@ def driver(argv):
         help='Comma-separated subset of conditions')
     parser.add_argument('--seeds', type=str, default=None,
         help='Comma-separated subset of seeds')
+    parser.add_argument('--pufferlib', type=str, default=PUFFERLIB_DIR,
+        help='PufferLib root holding the built ./puffer')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
+
+    PUFFERLIB_DIR = os.path.abspath(args.pufferlib)
+    puffer_path = os.path.normpath(os.path.join(PUFFERLIB_DIR, PUFFER_BIN))
 
     conditions = args.only.split(',') if args.only else list(CONDITIONS)
     for c in conditions:
@@ -228,11 +236,11 @@ def driver(argv):
             mark = 'skip' if (condition, seed) in skipped else 'write'
             print(f'{mark:>5}  {run_path(condition, seed)}')
             print(f'       {" ".join(puffer_command(condition, seed))}')
-        found = os.path.exists(PUFFER_BIN)
-        print(f'binary: {"ok" if found else f"missing, build with ./build.sh {ENV_NAME}"}')
+        found = os.path.exists(puffer_path)
+        print(f'binary: {puffer_path} {"ok" if found else f"missing, build with ./build.sh {ENV_NAME}"}')
         return 0
 
-    assert os.path.exists(PUFFER_BIN), f'no {PUFFER_BIN}: build with ./build.sh {ENV_NAME}'
+    assert os.path.exists(puffer_path), f'no {puffer_path}: build with ./build.sh {ENV_NAME}'
 
     results = []
     durations = []
