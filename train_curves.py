@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-ENV_NAME = 'common_harvest'
+ENV_NAME = 'cleanup'
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PUFFERLIB_DIR = os.path.join(REPO_ROOT, '..', 'pufferlib')
 PUFFER_BIN = './puffer'
@@ -23,7 +23,7 @@ PUFFER_BIN = './puffer'
 CONDITIONS = {
     'ippo_IR': {'env.shared_rewards': False, 'env.inequity_aversion': False},
     'ippo_SR': {'env.shared_rewards': True, 'env.inequity_aversion': False},
-    'ippo_IA': {'env.shared_rewards': False, 'env.inequity_aversion': True},
+    'ippo_IA_5D': {'env.shared_rewards': False, 'env.inequity_aversion': True},
 }
 
 SEEDS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
