@@ -26,7 +26,7 @@ CONDITIONS = {
     'ippo_IA': {'env.shared_rewards': False, 'env.inequity_aversion': True},
 }
 
-SEEDS = (1, 2, 3, 4, 5)
+SEEDS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 TOTAL_TIMESTEPS = None
 POINTS = 64
 FINAL_EVAL_EPISODES = 10_000
