@@ -15,18 +15,25 @@ import sys
 import time
 from datetime import datetime, timezone
 
-ENV_NAME = 'cleanup'
+ENV_NAME = 'common_harvest'
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PUFFERLIB_DIR = os.path.join(REPO_ROOT, '..', 'pufferlib')
 PUFFER_BIN = './puffer'
 
 CONDITIONS = {
-    'ippo_IR': {'env.shared_rewards': False, 'env.inequity_aversion': False},
-    'ippo_SR': {'env.shared_rewards': True, 'env.inequity_aversion': False},
-    'ippo_IA_5D': {'env.shared_rewards': False, 'env.inequity_aversion': True},
+    'ippo_SR_bestHP1': {'train.learning_rate': 0.00511051994, 'train.ent_coef': 0.00496632233,
+        'train.clip_coef': 1, 'train.vf_clip_coef': 0.196644962, 'train.max_grad_norm': 0.230315849},
+    'ippo_SR_bestHP2': {'train.learning_rate': 0.00499677658, 'train.ent_coef': 0.000238814173,
+        'train.clip_coef': 1, 'train.vf_clip_coef': 0.36401403, 'train.max_grad_norm': 0.176118419},
+    'ippo_SR_bestHP3': {'train.learning_rate': 0.00621463032, 'train.ent_coef': 0.000200891183,
+        'train.clip_coef': 1, 'train.vf_clip_coef': 0.110606357, 'train.max_grad_norm': 0.223187044},
+    'ippo_SR_bestHP4': {'train.learning_rate': 0.00792048406, 'train.ent_coef': 0.000245985604,
+        'train.clip_coef': 1, 'train.vf_clip_coef': 0.15916875, 'train.max_grad_norm': 0.177031964},
+    'ippo_SR_bestHP5': {'train.learning_rate': 0.00500054145, 'train.ent_coef': 0.00667259563,
+        'train.clip_coef': 1, 'train.vf_clip_coef': 0.215366215, 'train.max_grad_norm': 0.446299344},
 }
 
-SEEDS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+SEEDS = (1, 2, 3)
 TOTAL_TIMESTEPS = None
 POINTS = 64
 FINAL_EVAL_EPISODES = 10_000
